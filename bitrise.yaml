@@ -3,12 +3,12 @@ default_step_lib_source: "https://github.com/bitrise-io/bitrise-steplib.git"
 
 app:
   envs:
-    - PROJECT_PATH: "carpark.xcodeproj"
-    - SCHEME: "carpark"
+    - PROJECT_PATH: "KvasHelpler.xcodeproj"
+    - SCHEME: "KvasHelpler"
     - EXPORT_METHOD: "app-store"
-    - BUNDLE_ID: "com.yourco.veloledger"
+    - BUNDLE_ID: "com.yourco.kvasscraft"
     - TEAM_ID: "P369Q4JKSU"
-    - PROFILE_UUID: "e0771303-99aa-4266-a19f-3bf46525e532"
+    - PROFILE_UUID: "87ac9e87-2694-47da-acbc-97eda372d4b1"
 
 workflows:
   archive_and_export_app:
