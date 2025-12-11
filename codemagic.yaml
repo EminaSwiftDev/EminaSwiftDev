@@ -8,14 +8,16 @@ workflows:
         - signing            # CERTIFICATE_P12, CERTIFICATE_PASSWORD, MOBILEPROVISION
         - appstore_connect   # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
       vars:
-        XCODE_PROJECT: "Sparklapse.xcodeproj"
+        XCODE_PROJECT: "Sparklapse.xcodeproj"   # или задай XCODE_WORKSPACE вместо XCODE_PROJECT
         XCODE_SCHEME: "Sparklapse"
         BUNDLE_ID: "com.yourco.timeapps"
-        TEAM_ID: "OVERRIDE_BY_PROFILE"   # будет заменён на значение из профиля
+        TEAM_ID: "OVERRIDE_BY_PROFILE"        # заменится значением из профиля
         EXPORT_METHOD: "app-store"
+        # APP_VERSION: "1.1"                  # ← опционально, если хочешь поднять маркетинговую версию
+        # APP_BUILD: "123"                    # ← опционально, если хочешь задать build вручную (иначе timestamp)
 
     scripts:
-      - name: Import certificate and profile
+      - name: "Import certificate and profile"
         script: |
           set -euo pipefail
 
@@ -44,40 +46,54 @@ workflows:
           echo "PROFILE_UUID=$PROFILE_UUID" >> "$CM_ENV"
           echo "TEAM_ID=$PROFILE_TEAM_ID"   >> "$CM_ENV"
 
-          # Diagnostics (не ломают билд)
-          echo "== Code signing identities in keychain =="
-          security find-identity -v -p codesigning || true
-
           # Valid exportOptions.plist (XML)
           cat > exportOptions.plist <<EOI
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
+          <plist version="1.0"><dict>
             <key>method</key><string>${EXPORT_METHOD}</string>
             <key>teamID</key><string>${TEAM_ID}</string>
             <key>signingStyle</key><string>manual</string>
-            <key>provisioningProfiles</key>
-            <dict>
+            <key>provisioningProfiles</key><dict>
               <key>${BUNDLE_ID}</key><string>${PROFILE_UUID}</string>
             </dict>
             <key>compileBitcode</key><false/>
             <key>stripSwiftSymbols</key><true/>
             <key>destination</key><string>export</string>
-          </dict>
-          </plist>
+          </dict></plist>
           EOI
           /usr/bin/plutil -lint exportOptions.plist
 
           # Apply profile into the project for manual signing
           xcode-project use-profiles --project "$XCODE_PROJECT" --export-options-plist exportOptions.plist
 
-      - name: Archive and export IPA (xcodebuild)
+      - name: "Prepare versions (no Info.plist)"
         script: |
           set -euo pipefail
 
-          ARCHIVE_PATH="$CM_BUILD_DIR/Sparklapse.xcarchive"
+          # Всегда новый build; можно переопределить APP_BUILD в UI
+          BUILD_NUM="${APP_BUILD:-$(date +%y%j%H%M%S)}"
+          echo "BUILD_NUM=$BUILD_NUM" >> "$CM_ENV"
+
+          # APP_VERSION берётся из UI (если нужна смена маркетинговой версии)
+          if [ -n "${APP_VERSION:-}" ]; then
+            echo "APP_VERSION=$APP_VERSION" >> "$CM_ENV"
+          fi
+
+          echo "== Planned versions =="
+          echo "MARKETING_VERSION=${APP_VERSION:-(unchanged)}"
+          echo "CURRENT_PROJECT_VERSION=$BUILD_NUM"
+
+      - name: "Archive and export IPA (xcodebuild)"
+        script: |
+          set -euo pipefail ARCHIVE_PATH="$CM_BUILD_DIR/Sparklapse.xcarchive"
           EXPORT_PATH="$CM_EXPORT_DIR"
+
+          # Доп. флаги версий прямо в xcodebuild (работает без Info.plist)
+          EXTRA_FLAGS=( CURRENT_PROJECT_VERSION="$BUILD_NUM" )
+          if [ -n "${APP_VERSION:-}" ]; then
+            EXTRA_FLAGS+=( MARKETING_VERSION="$APP_VERSION" )
+          fi
 
           echo "Archiving to: $ARCHIVE_PATH"
           xcodebuild \
@@ -90,10 +106,10 @@ workflows:
             CODE_SIGN_STYLE=Manual \
             PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
             CODE_SIGN_IDENTITY="Apple Distribution" \
-            COMPILER_INDEX_STORE_ENABLE=NO
+            COMPILER_INDEX_STORE_ENABLE=NO \
+            "${EXTRA_FLAGS[@]}"
 
-
-echo "Exporting IPA to: $EXPORT_PATH"
+          echo "Exporting IPA to: $EXPORT_PATH"
           xcodebuild -exportArchive \
             -archivePath "$ARCHIVE_PATH" \
             -exportOptionsPlist exportOptions.plist \
@@ -101,8 +117,6 @@ echo "Exporting IPA to: $EXPORT_PATH"
 
           echo "Export dir listing:"
           ls -lah "$EXPORT_PATH" || true
-
-          # Упадём явно, если .ipa не создана (чтобы не было 'No artifacts were found')
           test -e "$EXPORT_PATH"/*.ipa
 
     artifacts:
