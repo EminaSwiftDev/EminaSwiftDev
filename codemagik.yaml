@@ -1,0 +1,118 @@
+workflows:
+  ios_appstore_manual_signing:
+    name: iOS App Store Manual signing
+    max_build_duration: 60
+
+    environment:
+      groups:
+        - signing            # CERTIFICATE_P12, CERTIFICATE_PASSWORD, MOBILEPROVISION
+        - appstore_connect   # APP_STORE_CONNECT_ISSUER_ID, APP_STORE_CONNECT_KEY_IDENTIFIER, APP_STORE_CONNECT_PRIVATE_KEY
+      vars:
+        XCODE_PROJECT: "Sparklapse.xcodeproj"
+        XCODE_SCHEME: "Sparklapse"
+        BUNDLE_ID: "com.yourco.timeapps"
+        TEAM_ID: "OVERRIDE_BY_PROFILE"   # будет заменён на значение из профиля
+        EXPORT_METHOD: "app-store"
+
+    scripts:
+      - name: Import certificate and profile
+        script: |
+          set -euo pipefail
+
+          echo "$CERTIFICATE_P12" | base64 --decode > cert.p12
+          echo "$MOBILEPROVISION" | base64 --decode > profile.mobileprovision
+
+          # Keychain + certificate
+          keychain initialize
+          if [ -n "${CERTIFICATE_PASSWORD:-}" ]; then
+            keychain add-certificates --certificate cert.p12 --certificate-password "$CERTIFICATE_PASSWORD"
+          else
+            keychain add-certificates --certificate cert.p12
+          fi
+
+          # Install provisioning profile and read UUID + TeamIdentifier
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE_PLIST="$(security cms -D -i profile.mobileprovision)"
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print UUID' /dev/stdin <<< "$PROFILE_PLIST")
+          PROFILE_TEAM_ID=$(/usr/libexec/PlistBuddy -c 'Print TeamIdentifier:0' /dev/stdin <<< "$PROFILE_PLIST")
+
+          cp profile.mobileprovision "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          echo "Using Provisioning Profile UUID: $PROFILE_UUID"
+          echo "TeamIdentifier from profile: $PROFILE_TEAM_ID"
+
+          # export to env for next steps
+          echo "PROFILE_UUID=$PROFILE_UUID" >> "$CM_ENV"
+          echo "TEAM_ID=$PROFILE_TEAM_ID"   >> "$CM_ENV"
+
+          # Diagnostics (не ломают билд)
+          echo "== Code signing identities in keychain =="
+          security find-identity -v -p codesigning || true
+
+          # Valid exportOptions.plist (XML)
+          cat > exportOptions.plist <<EOI
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key><string>${EXPORT_METHOD}</string>
+            <key>teamID</key><string>${TEAM_ID}</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>${BUNDLE_ID}</key><string>${PROFILE_UUID}</string>
+            </dict>
+            <key>compileBitcode</key><false/>
+            <key>stripSwiftSymbols</key><true/>
+            <key>destination</key><string>export</string>
+          </dict>
+          </plist>
+          EOI
+          /usr/bin/plutil -lint exportOptions.plist
+
+          # Apply profile into the project for manual signing
+          xcode-project use-profiles --project "$XCODE_PROJECT" --export-options-plist exportOptions.plist
+
+      - name: Archive and export IPA (xcodebuild)
+        script: |
+          set -euo pipefail
+
+          ARCHIVE_PATH="$CM_BUILD_DIR/Sparklapse.xcarchive"
+          EXPORT_PATH="$CM_EXPORT_DIR"
+
+          echo "Archiving to: $ARCHIVE_PATH"
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration Release \
+            -archivePath "$ARCHIVE_PATH" \
+            archive \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            COMPILER_INDEX_STORE_ENABLE=NO
+
+
+echo "Exporting IPA to: $EXPORT_PATH"
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportOptionsPlist exportOptions.plist \
+            -exportPath "$EXPORT_PATH"
+
+          echo "Export dir listing:"
+          ls -lah "$EXPORT_PATH" || true
+
+          # Упадём явно, если .ipa не создана (чтобы не было 'No artifacts were found')
+          test -e "$EXPORT_PATH"/*.ipa
+
+    artifacts:
+      - $CM_EXPORT_DIR/*.ipa
+      - $CM_EXPORT_DIR/*.dSYM.zip
+      - $CM_EXPORT_DIR/*.xcarchive
+
+    publishing:
+      app_store_connect:
+        api_key: $APP_STORE_CONNECT_PRIVATE_KEY
+        key_id: $APP_STORE_CONNECT_KEY_IDENTIFIER
+        issuer_id: $APP_STORE_CONNECT_ISSUER_ID
+        submit_to_testflight: true
